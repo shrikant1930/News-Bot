@@ -1,0 +1,105 @@
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from forex_bot.calendar import fetch_prepared_events, reconcile
+from forex_bot.filters import event_matches_group, local_time, normalized_minutes, parse_utc
+from forex_bot.messages import alert_message, digest_message
+
+
+ALERT_EARLY_SECONDS = 15
+ALERT_LATE_SECONDS = 90
+
+
+class BotService:
+    def __init__(self, repository, telegram, now=lambda: datetime.now(timezone.utc)):
+        self.repository = repository
+        self.telegram = telegram
+        self.now = now
+
+    def refresh_calendar(self) -> dict[str, int]:
+        # Fetch and validate before any database write: a bad response cannot erase 43+ active records.
+        prepared = fetch_prepared_events()
+        current, created, changed, removed = reconcile(self.repository.load_events(), prepared)
+        self.repository.save_events(current)
+        return {"active": sum(event.get("status") == "active" for event in current.values()), "created": len(created), "changed": len(changed), "removed": len(removed)}
+
+    def check_deliveries(self, dry_run: bool = False) -> int:
+        now = self.now()
+        delivered = 0
+        events = self.repository.active_events()
+        for group in self.repository.enabled_groups():
+            try:
+                ZoneInfo(group["timezone"])
+            except (KeyError, ValueError):
+                continue
+            matching = [event for event in events if event_matches_group(event, group)]
+            for event in matching:
+                for minutes in normalized_minutes(group):
+                    scheduled = parse_utc(event["time_utc"]) - timedelta(minutes=minutes)
+                    if not _due(now, scheduled):
+                        continue
+                    if self._deliver_alert(event, group, minutes, scheduled, dry_run):
+                        delivered += 1
+            delivered += self._deliver_digests(matching, group, now, dry_run)
+        return delivered
+
+    def _deliver_alert(self, event, group, minutes, scheduled, dry_run):
+        row = {"chat_id": str(group["chat_id"]), "event_id": event["id"], "alert_type": _alert_type(minutes), "minutes_before": minutes, "scheduled_for": scheduled.isoformat(), "status": "pending"}
+        if dry_run:
+            return True
+        if not self.repository.claim_alert(row):
+            return False
+        key = {field: row[field] for field in ("chat_id", "event_id", "minutes_before", "scheduled_for")}
+        try:
+            message_id = self.telegram.send(group["chat_id"], alert_message(event, group, minutes))
+            self.repository.complete_alert(key, message_id)
+            return True
+        except Exception:
+            self.repository.fail_alert(key)
+            return False
+
+    def _deliver_digests(self, events, group, now, dry_run):
+        local_now = now.astimezone(ZoneInfo(group["timezone"]))
+        count = 0
+        daily_time = group.get("daily_digest_time")
+        if group.get("daily_digest_enabled") and _time_due(local_now, daily_time):
+            day_events = [event for event in events if local_time(event, group["timezone"]).date() == local_now.date()]
+            count += self._deliver_digest(group, "daily", local_now.date(), day_events, dry_run)
+        weekly_time = group.get("weekly_digest_time")
+        if group.get("weekly_digest_enabled") and local_now.weekday() == int(group.get("weekly_digest_day", 0)) and _time_due(local_now, weekly_time):
+            end = local_now.date() + timedelta(days=7)
+            week_events = [event for event in events if local_now.date() <= local_time(event, group["timezone"]).date() < end]
+            count += self._deliver_digest(group, "weekly", local_now.date(), week_events, dry_run)
+        return count
+
+    def _deliver_digest(self, group, kind, digest_date, events, dry_run):
+        if dry_run:
+            return 1
+        if not self.repository.claim_digest(group["chat_id"], kind, digest_date.isoformat()):
+            return 0
+        try:
+            message_id = self.telegram.send(group["chat_id"], digest_message(events, group, kind, digest_date))
+            self.repository.complete_digest(group["chat_id"], kind, digest_date.isoformat(), message_id)
+            return 1
+        except Exception:
+            self.repository.fail_digest(group["chat_id"], kind, digest_date.isoformat())
+            return 0
+
+
+def _due(now, scheduled):
+    seconds = (scheduled - now).total_seconds()
+    return -ALERT_LATE_SECONDS <= seconds <= ALERT_EARLY_SECONDS
+
+
+def _alert_type(minutes):
+    return "release" if minutes == 0 else (f"before_{minutes}m" if minutes > 0 else f"after_{abs(minutes)}m")
+
+
+def _time_due(local_now, configured):
+    if not isinstance(configured, str):
+        return False
+    try:
+        hour, minute = (int(value) for value in configured.split(":", 1))
+    except ValueError:
+        return False
+    return (hour, minute) == (local_now.hour, local_now.minute)
