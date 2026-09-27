@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
-from forex_bot.service import BotService
+from forex_bot.filters import event_matches_group
+from forex_bot.repository import _stale_claim
+from forex_bot.service import BotService, _time_due
 
 
 class Repository:
@@ -10,8 +12,10 @@ class Repository:
 
     def active_events(self): return self.events
     def enabled_groups(self): return self.groups
-    def claim_alert(self, row):
+    def claim_alert(self, row, recovery=False):
         key = (row["chat_id"], row["event_id"], row["minutes_before"], row["scheduled_for"])
+        if recovery:
+            return False
         if key in self.claimed_alerts: return False
         self.claimed_alerts.add(key); return True
     def complete_alert(self, key, message_id): pass
@@ -57,6 +61,11 @@ def test_speech_bypasses_impact_only_when_enabled():
     assert allowed.check_deliveries() == 1
 
 
+def test_currency_filters_are_case_insensitive_and_reject_unsupported_codes():
+    assert event_matches_group(event(datetime.now(timezone.utc), currency="usd"), group(currencies=["Usd", "eur", "not-a-currency"]))
+    assert not event_matches_group(event(datetime.now(timezone.utc), currency="XXX"), group(currencies=["xxx", "USD"]))
+
+
 def test_daily_digest_is_local_timezone_filtered_and_deduplicated():
     now = datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)  # 11:00 in Kolkata
     repository, telegram = Repository([event(now + timedelta(hours=1))], [group(alert_minutes_before=[], daily_digest_enabled=True, daily_digest_time="11:00")]), Telegram()
@@ -66,15 +75,55 @@ def test_daily_digest_is_local_timezone_filtered_and_deduplicated():
     assert "Daily Economic Briefing" in telegram.messages[0][1]
 
 
+def test_daily_digest_accepts_seconds_and_startup_grace_period():
+    now = datetime(2026, 1, 1, 5, 32, 15, tzinfo=timezone.utc)  # 11:02:15 in Kolkata
+    repository = Repository(
+        [event(now + timedelta(hours=1))],
+        [group(alert_minutes_before=[], daily_digest_enabled=True, daily_digest_time="11:00:00")],
+    )
+    telegram = Telegram()
+    assert BotService(repository, telegram, now=lambda: now).check_deliveries() == 1
+    assert "Daily Economic Briefing" in telegram.messages[0][1]
+    assert not _time_due(now.astimezone().replace(hour=11, minute=5, second=1), "11:00:00")
+
+
 def test_weekly_digest_is_sent_on_configured_local_day():
-    now = datetime(2026, 1, 5, 5, 30, tzinfo=timezone.utc)  # Monday, 11:00 in Kolkata
+    now = datetime(2026, 1, 4, 5, 30, tzinfo=timezone.utc)  # Sunday, 11:00 in Kolkata
     repository = Repository(
         [event(now + timedelta(days=2))],
-        [group(alert_minutes_before=[], weekly_digest_enabled=True, weekly_digest_day=0, weekly_digest_time="11:00")],
+        [group(alert_minutes_before=[], weekly_digest_enabled=True, weekly_digest_day=6, weekly_digest_time="11:00:00")],
     )
     telegram = Telegram()
     assert BotService(repository, telegram, now=lambda: now).check_deliveries() == 1
     assert "Weekly Economic Briefing" in telegram.messages[0][1]
+
+
+def test_stale_claim_is_recovered_within_recovery_window():
+    class RecoveryRepository(Repository):
+        def __init__(self, events, groups):
+            super().__init__(events, groups)
+            self.recovery_attempts = []
+
+        def claim_alert(self, row, recovery=False):
+            self.recovery_attempts.append(recovery)
+            return recovery
+
+    now = datetime(2026, 1, 1, 10, 3, tzinfo=timezone.utc)
+    repository, telegram = RecoveryRepository([event(now - timedelta(minutes=3))], [group(alert_minutes_before=[])]), Telegram()
+    # A release schedule three minutes ago is outside normal delivery timing,
+    # but eligible to recover a stale claim after a worker crash.
+    service = BotService(repository, telegram, now=lambda: now)
+    assert service._deliver_alert(event(now - timedelta(minutes=3)), group(), 0, now - timedelta(minutes=3), False, recovery=True)
+    assert repository.recovery_attempts == [True]
+    assert len(telegram.messages) == 1
+
+
+def test_stale_claim_requires_pending_or_failed_status_and_two_minutes():
+    now = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
+    assert not _stale_claim({"status": "sent", "claimed_at": (now - timedelta(days=1)).isoformat()}, now)
+    assert not _stale_claim({"status": "pending", "claimed_at": (now - timedelta(minutes=1)).isoformat()}, now)
+    assert _stale_claim({"status": "pending", "claimed_at": (now - timedelta(minutes=2)).isoformat()}, now)
+    assert _stale_claim({"status": "failed", "claimed_at": None}, now)
 
 
 def test_calendar_failure_does_not_write_existing_events(monkeypatch):

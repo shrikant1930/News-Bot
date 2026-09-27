@@ -1,9 +1,26 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+SUPPORTED_CURRENCIES = frozenset({"USD", "EUR", "GBP", "JPY", "CAD", "AUD", "NZD", "CHF"})
+
+
+def normalize_currency(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    currency = value.strip().upper()
+    return currency if currency in SUPPORTED_CURRENCIES else None
+
+
+def normalized_currencies(group: dict) -> set[str]:
+    values = group.get("currencies", [])
+    if not isinstance(values, list):
+        return set()
+    return {currency for value in values if (currency := normalize_currency(value)) is not None}
+
 
 def event_matches_group(event: dict, group: dict) -> bool:
-    if event.get("currency") not in group.get("currencies", []):
+    currency = normalize_currency(event.get("currency"))
+    if currency is None or currency not in normalized_currencies(group):
         return False
     if event.get("is_speech", False):
         return bool(group.get("include_speeches", False))

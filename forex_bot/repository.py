@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from supabase import Client, create_client
@@ -22,15 +22,31 @@ class SupabaseRepository:
     def enabled_groups(self) -> list[dict[str, Any]]:
         return self.client.table("telegram_group_settings").select("*").eq("enabled", True).execute().data or []
 
-    def claim_alert(self, row: dict[str, Any]) -> bool:
+    def claim_alert(self, row: dict[str, Any], recovery: bool = False) -> bool:
         """Claim before delivery; unique index makes the claim restart-safe.
 
-        A failed send remains claimed because Telegram has no idempotency key.
-        Retrying a timed-out request could deliver the same alert twice.
+        Fresh pending deliveries are never retried. A stale claim can be
+        reclaimed atomically after a worker crash or confirmed send failure.
         """
+        key = _alert_key(row)
+        claimed_at = _utc_now()
+        pending_row = {**row, "status": "pending", "claimed_at": claimed_at.isoformat()}
+        if not recovery:
+            try:
+                self.client.table("alert_log").insert(pending_row).execute()
+                return True
+            except Exception:
+                pass
         try:
-            self.client.table("alert_log").insert(row).execute()
-            return True
+            rows = self.client.table("alert_log").select("status,claimed_at").match(key).limit(1).execute().data or []
+            if not rows or not _stale_claim(rows[0], claimed_at):
+                return False
+            previous = rows[0]
+            query = self.client.table("alert_log").update({"status": "pending", "claimed_at": claimed_at.isoformat()}).match(key).eq("status", previous["status"])
+            if previous.get("claimed_at") is not None:
+                query = query.eq("claimed_at", previous["claimed_at"])
+            updated = query.select("status").execute().data or []
+            return bool(updated)
         except Exception:
             return False
 
@@ -56,5 +72,28 @@ class SupabaseRepository:
 
 
 def _utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _utc_now().isoformat()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _alert_key(row: dict[str, Any]) -> dict[str, Any]:
+    return {field: row[field] for field in ("chat_id", "event_id", "minutes_before", "scheduled_for")}
+
+
+def _stale_claim(row: dict[str, Any], now: datetime) -> bool:
+    if row.get("status") not in {"pending", "failed"}:
+        return False
+    value = row.get("claimed_at")
+    if not value:
+        return True
+    try:
+        claimed_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return True
+    if claimed_at.tzinfo is None:
+        claimed_at = claimed_at.replace(tzinfo=timezone.utc)
+    return claimed_at.astimezone(timezone.utc) <= now - timedelta(minutes=2)
 

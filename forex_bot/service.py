@@ -8,6 +8,9 @@ from forex_bot.messages import alert_message, digest_message
 
 ALERT_EARLY_SECONDS = 15
 ALERT_LATE_SECONDS = 90
+DIGEST_GRACE_SECONDS = 5 * 60
+ALERT_CLAIM_STALE_SECONDS = 2 * 60
+ALERT_RECOVERY_SECONDS = 15 * 60
 
 
 class BotService:
@@ -36,18 +39,20 @@ class BotService:
             for event in matching:
                 for minutes in normalized_minutes(group):
                     scheduled = parse_utc(event["time_utc"]) - timedelta(minutes=minutes)
-                    if not _due(now, scheduled):
+                    due = _due(now, scheduled)
+                    recovery = _recovery_window(now, scheduled)
+                    if not due and not recovery:
                         continue
-                    if self._deliver_alert(event, group, minutes, scheduled, dry_run):
+                    if self._deliver_alert(event, group, minutes, scheduled, dry_run, recovery=not due):
                         delivered += 1
             delivered += self._deliver_digests(matching, group, now, dry_run)
         return delivered
 
-    def _deliver_alert(self, event, group, minutes, scheduled, dry_run):
+    def _deliver_alert(self, event, group, minutes, scheduled, dry_run, recovery=False):
         row = {"chat_id": str(group["chat_id"]), "event_id": event["id"], "alert_type": _alert_type(minutes), "minutes_before": minutes, "scheduled_for": scheduled.isoformat(), "status": "pending"}
         if dry_run:
             return True
-        if not self.repository.claim_alert(row):
+        if not self.repository.claim_alert(row, recovery=recovery):
             return False
         key = {field: row[field] for field in ("chat_id", "event_id", "minutes_before", "scheduled_for")}
         try:
@@ -66,6 +71,7 @@ class BotService:
             day_events = [event for event in events if local_time(event, group["timezone"]).date() == local_now.date()]
             count += self._deliver_digest(group, "daily", local_now.date(), day_events, dry_run)
         weekly_time = group.get("weekly_digest_time")
+        # Python datetime.weekday(): Monday is 0 and Sunday is 6.
         if group.get("weekly_digest_enabled") and local_now.weekday() == int(group.get("weekly_digest_day", 0)) and _time_due(local_now, weekly_time):
             end = local_now.date() + timedelta(days=7)
             week_events = [event for event in events if local_now.date() <= local_time(event, group["timezone"]).date() < end]
@@ -91,6 +97,11 @@ def _due(now, scheduled):
     return -ALERT_LATE_SECONDS <= seconds <= ALERT_EARLY_SECONDS
 
 
+def _recovery_window(now, scheduled):
+    elapsed = (now - scheduled).total_seconds()
+    return ALERT_CLAIM_STALE_SECONDS <= elapsed <= ALERT_RECOVERY_SECONDS
+
+
 def _alert_type(minutes):
     return "release" if minutes == 0 else (f"before_{minutes}m" if minutes > 0 else f"after_{abs(minutes)}m")
 
@@ -99,7 +110,9 @@ def _time_due(local_now, configured):
     if not isinstance(configured, str):
         return False
     try:
-        hour, minute = (int(value) for value in configured.split(":", 1))
+        scheduled = datetime.strptime(configured, "%H:%M:%S").time() if configured.count(":") == 2 else datetime.strptime(configured, "%H:%M").time()
     except ValueError:
         return False
-    return (hour, minute) == (local_now.hour, local_now.minute)
+    scheduled_at = local_now.replace(hour=scheduled.hour, minute=scheduled.minute, second=scheduled.second, microsecond=0)
+    elapsed = (local_now - scheduled_at).total_seconds()
+    return 0 <= elapsed <= DIGEST_GRACE_SECONDS
