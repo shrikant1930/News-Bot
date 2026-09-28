@@ -2,7 +2,13 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from forex_bot.calendar import fetch_prepared_events, reconcile
-from forex_bot.filters import event_matches_group, local_time, normalized_minutes, parse_utc
+from forex_bot.filters import (
+    event_matches_group,
+    event_matches_alert_group,
+    local_time,
+    normalized_minutes,
+    parse_utc,
+)
 from forex_bot.messages import alert_message, digest_message
 
 
@@ -35,17 +41,41 @@ class BotService:
                 ZoneInfo(group["timezone"])
             except (KeyError, ValueError):
                 continue
-            matching = [event for event in events if event_matches_group(event, group)]
-            for event in matching:
+            matching = [
+                event
+                for event in events
+                if event_matches_group(event, group)
+            ]
+
+            alert_matching = [
+                event
+                for event in events
+                if event_matches_alert_group(event, group)
+            ]
+
+            for event in alert_matching:
                 for minutes in normalized_minutes(group):
                     scheduled = parse_utc(event["time_utc"]) - timedelta(minutes=minutes)
                     due = _due(now, scheduled)
                     recovery = _recovery_window(now, scheduled)
                     if not due and not recovery:
                         continue
-                    if self._deliver_alert(event, group, minutes, scheduled, dry_run, recovery=not due):
+                    if self._deliver_alert(
+                        event,
+                        group,
+                        minutes,
+                        scheduled,
+                        dry_run,
+                        recovery=not due,
+                    ):
                         delivered += 1
-            delivered += self._deliver_digests(matching, group, now, dry_run)
+
+            delivered += self._deliver_digests(
+                matching,
+                group,
+                now,
+                dry_run,
+            )
         return delivered
 
     def _deliver_alert(self, event, group, minutes, scheduled, dry_run, recovery=False):
