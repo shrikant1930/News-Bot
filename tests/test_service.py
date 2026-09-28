@@ -51,13 +51,25 @@ def test_alert_claim_prevents_duplicate_after_restart_window():
     assert len(telegram.messages) == 1
 
 
-def test_speech_bypasses_impact_only_when_enabled():
+def test_speech_alerts_respect_alert_impacts():
     now = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
-    item = event(now, impact="Low", speech=True)
-    blocked = BotService(Repository([item], [group()]), Telegram(), now=lambda: now)
-    allowed_telegram = Telegram()
-    allowed = BotService(Repository([item], [group(include_speeches=True)]), allowed_telegram, now=lambda: now)
+
+    low_speech = event(now, impact="Low", speech=True)
+    high_speech = event(now, impact="High", speech=True)
+
+    blocked = BotService(
+        Repository([low_speech], [group(include_speeches=True, alert_impacts=["High"])]),
+        Telegram(),
+        now=lambda: now,
+    )
     assert blocked.check_deliveries() == 0
+
+    allowed_telegram = Telegram()
+    allowed = BotService(
+        Repository([high_speech], [group(include_speeches=True, alert_impacts=["High"])]),
+        allowed_telegram,
+        now=lambda: now,
+    )
     assert allowed.check_deliveries() == 1
 
 
@@ -84,7 +96,8 @@ def test_daily_digest_accepts_seconds_and_startup_grace_period():
     telegram = Telegram()
     assert BotService(repository, telegram, now=lambda: now).check_deliveries() == 1
     assert "Daily Economic Briefing" in telegram.messages[0][1]
-    assert not _time_due(now.astimezone().replace(hour=11, minute=5, second=1), "11:00:00")
+    assert _time_due(now.astimezone().replace(hour=11, minute=14, second=59), "11:00:00")
+    assert not _time_due(now.astimezone().replace(hour=11, minute=15, second=1), "11:00:00")
 
 
 def test_weekly_digest_is_sent_on_configured_local_day():
