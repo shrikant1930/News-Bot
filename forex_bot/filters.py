@@ -24,25 +24,27 @@ def event_matches_group(event: dict, group: dict) -> bool:
     if currency is None or currency not in normalized_currencies(group):
         return False
 
-    if event.get("is_speech", False):
-        return bool(group.get("include_speeches", False))
+    impact = event.get("impact")
 
-    return event.get("impact") in group.get("impacts", [])
+    # Normal events and speeches both follow the selected impact list.
+    if impact in group.get("impacts", []):
+        return True
+
+    # When enabled, also include speeches outside the selected impact list.
+    if event.get("is_speech", False) and group.get("include_speeches", False):
+        return True
+
+    return False
 
 
 def event_matches_alert_group(event: dict, group: dict) -> bool:
-    """Match events that are allowed to trigger timed alerts."""
+    """Match events allowed to trigger timed alerts."""
     currency = normalize_currency(event.get("currency"))
     if currency is None or currency not in normalized_currencies(group):
         return False
 
-    if event.get("impact") not in group.get("alert_impacts", []):
-        return False
-
-    if event.get("is_speech", False):
-        return bool(group.get("include_speeches", False))
-
-    return True
+    # Alerts are controlled only by alert_impacts.
+    return event.get("impact") in group.get("alert_impacts", [])
 
 
 def parse_utc(value: str) -> datetime:
