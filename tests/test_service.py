@@ -38,7 +38,7 @@ def event(moment, currency="USD", impact="High", speech=False):
 
 
 def group(**extra):
-    value = {"chat_id": "100", "timezone": "Asia/Kolkata", "currencies": ["USD"], "impacts": ["High"], "include_speeches": False, "alert_minutes_before": [60, 15, 5, 0], "daily_digest_enabled": False, "weekly_digest_enabled": False}
+    value = {"chat_id": "100", "timezone": "Asia/Kolkata", "currencies": ["USD"], "impacts": ["High"], "alert_impacts": ["High"], "include_speeches": False, "alert_minutes_before": [60, 15, 5, 0], "daily_digest_enabled": False, "weekly_digest_enabled": False}
     value.update(extra); return value
 
 
