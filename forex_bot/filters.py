@@ -19,12 +19,30 @@ def normalized_currencies(group: dict) -> set[str]:
 
 
 def event_matches_group(event: dict, group: dict) -> bool:
+    """Match events for Daily/Weekly briefings."""
     currency = normalize_currency(event.get("currency"))
     if currency is None or currency not in normalized_currencies(group):
         return False
+
     if event.get("is_speech", False):
         return bool(group.get("include_speeches", False))
+
     return event.get("impact") in group.get("impacts", [])
+
+
+def event_matches_alert_group(event: dict, group: dict) -> bool:
+    """Match events that are allowed to trigger timed alerts."""
+    currency = normalize_currency(event.get("currency"))
+    if currency is None or currency not in normalized_currencies(group):
+        return False
+
+    if event.get("impact") not in group.get("alert_impacts", []):
+        return False
+
+    if event.get("is_speech", False):
+        return bool(group.get("include_speeches", False))
+
+    return True
 
 
 def parse_utc(value: str) -> datetime:
