@@ -67,6 +67,50 @@ class SupabaseRepository:
     def complete_digest(self, chat_id: str | int, digest_type: str, digest_date: str, message_id: int) -> None:
         self.client.table("digest_log").update({"status": "sent", "sent_at": _utc_iso(), "telegram_message_id": message_id}).match({"chat_id": str(chat_id), "digest_type": digest_type, "digest_date": digest_date}).execute()
 
+    def mark_digest_pinned(
+        self,
+        chat_id: str | int,
+        digest_type: str,
+        digest_date: str,
+    ) -> None:
+        self.client.table("digest_log").update(
+            {"status": "pinned"}
+        ).match(
+            {
+                "chat_id": str(chat_id),
+                "digest_type": digest_type,
+                "digest_date": digest_date,
+            }
+        ).execute()
+
+    def pinned_digests(self) -> list[dict[str, Any]]:
+        return (
+            self.client.table("digest_log")
+            .select(
+                "chat_id,digest_type,digest_date,sent_at,telegram_message_id"
+            )
+            .eq("status", "pinned")
+            .execute()
+            .data
+            or []
+        )
+
+    def mark_digest_unpinned(
+        self,
+        chat_id: str | int,
+        digest_type: str,
+        digest_date: str,
+    ) -> None:
+        self.client.table("digest_log").update(
+            {"status": "sent"}
+        ).match(
+            {
+                "chat_id": str(chat_id),
+                "digest_type": digest_type,
+                "digest_date": digest_date,
+            }
+        ).execute()
+
     def fail_digest(self, chat_id: str | int, digest_type: str, digest_date: str) -> None:
         self.client.table("digest_log").update({"status": "failed"}).match({"chat_id": str(chat_id), "digest_type": digest_type, "digest_date": digest_date}).execute()
 

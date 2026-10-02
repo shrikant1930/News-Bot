@@ -26,6 +26,14 @@ class Repository:
         self.claimed_digests.add(key); return True
     def complete_digest(self, *args): pass
     def fail_digest(self, *args): pass
+    def pinned_digests(self):
+        return []
+
+    def mark_digest_pinned(self, chat_id, digest_type, digest_date):
+        pass
+
+    def mark_digest_unpinned(self, chat_id, digest_type, digest_date):
+        pass
 
 
 class Telegram:

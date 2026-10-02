@@ -33,9 +33,11 @@ class BotService:
         self.repository.save_events(current)
         return {"active": sum(event.get("status") == "active" for event in current.values()), "created": len(created), "changed": len(changed), "removed": len(removed)}
 
-    def check_deliveries(self, dry_run: bool = False) -> int:
+    def check_deliveries(self, dry_run: bool = False):
         now = self.now()
         delivered = 0
+        self._cleanup_expired_pins(now, dry_run)
+
         events = self.repository.active_events()
         for group in self.repository.enabled_groups():
             try:
@@ -181,6 +183,52 @@ class BotService:
 
             return False
 
+    def _cleanup_expired_pins(self, now, dry_run=False):
+        for digest in self.repository.pinned_digests():
+            sent_at = digest.get("sent_at")
+            message_id = digest.get("telegram_message_id")
+
+            if not sent_at or not message_id:
+                continue
+
+            try:
+                sent_time = datetime.fromisoformat(
+                    sent_at.replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                continue
+
+            age = (now - sent_time).total_seconds()
+
+            if digest["digest_type"] == "daily":
+                expiry_seconds = 24 * 60 * 60
+            elif digest["digest_type"] == "weekly":
+                expiry_seconds = 7 * 24 * 60 * 60
+            else:
+                continue
+
+            if age < expiry_seconds:
+                continue
+
+            if dry_run:
+                continue
+
+            try:
+                self.telegram.unpin(
+                    digest["chat_id"],
+                    int(message_id),
+                )
+
+                self.repository.mark_digest_unpinned(
+                    digest["chat_id"],
+                    digest["digest_type"],
+                    digest["digest_date"],
+                )
+
+            except Exception:
+                # An unpin failure must never interrupt alerts or digests.
+                continue
+
     def _deliver_digests(self, events, group, now, dry_run):
         local_now = now.astimezone(ZoneInfo(group["timezone"]))
         count = 0
@@ -199,14 +247,65 @@ class BotService:
     def _deliver_digest(self, group, kind, digest_date, events, dry_run):
         if dry_run:
             return 1
-        if not self.repository.claim_digest(group["chat_id"], kind, digest_date.isoformat()):
+
+        if not self.repository.claim_digest(
+            group["chat_id"],
+            kind,
+            digest_date.isoformat(),
+        ):
             return 0
+
         try:
-            message_id = self.telegram.send(group["chat_id"], digest_message(events, group, kind, digest_date))
-            self.repository.complete_digest(group["chat_id"], kind, digest_date.isoformat(), message_id)
+            message_id = self.telegram.send(
+                group["chat_id"],
+                digest_message(
+                    events,
+                    group,
+                    kind,
+                    digest_date,
+                ),
+            )
+
+            # Mark the digest as successfully sent first.
+            # A pinning failure must never cause the digest to be resent.
+            self.repository.complete_digest(
+                group["chat_id"],
+                kind,
+                digest_date.isoformat(),
+                message_id,
+            )
+
+            pin_enabled = (
+                group.get("pin_daily_briefing", False)
+                if kind == "daily"
+                else group.get("pin_weekly_briefing", False)
+            )
+
+            if pin_enabled:
+                try:
+                    self.telegram.pin(
+                        group["chat_id"],
+                        message_id,
+                    )
+
+                    self.repository.mark_digest_pinned(
+                        group["chat_id"],
+                        kind,
+                        digest_date.isoformat(),
+                    )
+                except Exception:
+                    # Pinning is optional. A pin failure must not
+                    # turn a successfully sent digest into a failed digest.
+                    pass
+
             return 1
+
         except Exception:
-            self.repository.fail_digest(group["chat_id"], kind, digest_date.isoformat())
+            self.repository.fail_digest(
+                group["chat_id"],
+                kind,
+                digest_date.isoformat(),
+            )
             return 0
 
 
