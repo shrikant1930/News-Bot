@@ -9,6 +9,8 @@ class Repository:
     def __init__(self, events, groups):
         self.events, self.groups = events, groups
         self.claimed_alerts, self.claimed_digests = set(), set()
+        self.pinned_records = []
+        self.unpinned_records = []
 
     def active_events(self): return self.events
     def enabled_groups(self): return self.groups
@@ -27,18 +29,32 @@ class Repository:
     def complete_digest(self, *args): pass
     def fail_digest(self, *args): pass
     def pinned_digests(self):
-        return []
+        return self.pinned_records
 
     def mark_digest_pinned(self, chat_id, digest_type, digest_date):
         pass
 
     def mark_digest_unpinned(self, chat_id, digest_type, digest_date):
-        pass
+        self.unpinned_records.append(
+           (str(chat_id), digest_type, digest_date)
+        )
 
 
 class Telegram:
-    def __init__(self): self.messages = []
-    def send(self, chat_id, text): self.messages.append((chat_id, text)); return len(self.messages)
+    def __init__(self):
+        self.messages = []
+        self.pinned = []
+        self.unpinned = []
+
+    def send(self, chat_id, text):
+        self.messages.append((chat_id, text))
+        return len(self.messages)
+
+    def pin(self, chat_id, message_id):
+        self.pinned.append((chat_id, message_id))
+
+    def unpin(self, chat_id, message_id):
+        self.unpinned.append((chat_id, message_id))
 
 
 def event(moment, currency="USD", impact="High", speech=False):
@@ -165,3 +181,96 @@ def test_calendar_failure_does_not_write_existing_events(monkeypatch):
     except RuntimeError:
         pass
     assert not repository.saved
+def test_daily_digest_is_pinned_when_enabled():
+    now = datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
+    repository = Repository(
+        [event(now + timedelta(hours=1))],
+        [
+            group(
+                alert_minutes_before=[],
+                daily_digest_enabled=True,
+                daily_digest_time="11:00",
+                pin_daily_briefing=True,
+            )
+        ],
+    )
+    telegram = Telegram()
+
+    service = BotService(repository, telegram, now=lambda: now)
+
+    assert service.check_deliveries() == 1
+    assert len(telegram.messages) == 1
+    assert telegram.pinned == [("100", 1)]
+
+
+def test_weekly_digest_is_pinned_when_enabled():
+    now = datetime(2026, 1, 4, 5, 30, tzinfo=timezone.utc)
+    repository = Repository(
+        [event(now + timedelta(days=2))],
+        [
+            group(
+                alert_minutes_before=[],
+                weekly_digest_enabled=True,
+                weekly_digest_day=6,
+                weekly_digest_time="11:00:00",
+                pin_weekly_briefing=True,
+            )
+        ],
+    )
+    telegram = Telegram()
+
+    service = BotService(repository, telegram, now=lambda: now)
+
+    assert service.check_deliveries() == 1
+    assert len(telegram.messages) == 1
+    assert telegram.pinned == [("100", 1)]
+
+
+def test_expired_daily_pin_is_unpinned():
+    now = datetime(2026, 1, 2, 10, tzinfo=timezone.utc)
+
+    repository = Repository([], [])
+    repository.pinned_records = [
+        {
+            "chat_id": "100",
+            "digest_type": "daily",
+            "digest_date": "2026-01-01",
+            "sent_at": (now - timedelta(hours=25)).isoformat(),
+            "telegram_message_id": 42,
+        }
+    ]
+
+    telegram = Telegram()
+    service = BotService(repository, telegram, now=lambda: now)
+
+    service._cleanup_expired_pins(now)
+
+    assert telegram.unpinned == [("100", 42)]
+    assert repository.unpinned_records == [
+        ("100", "daily", "2026-01-01")
+    ]
+
+
+def test_expired_weekly_pin_is_unpinned():
+    now = datetime(2026, 1, 12, 10, tzinfo=timezone.utc)
+
+    repository = Repository([], [])
+    repository.pinned_records = [
+        {
+            "chat_id": "100",
+            "digest_type": "weekly",
+            "digest_date": "2026-01-05",
+            "sent_at": (now - timedelta(days=8)).isoformat(),
+            "telegram_message_id": 99,
+        }
+    ]
+
+    telegram = Telegram()
+    service = BotService(repository, telegram, now=lambda: now)
+
+    service._cleanup_expired_pins(now)
+
+    assert telegram.unpinned == [("100", 99)]
+    assert repository.unpinned_records == [
+        ("100", "weekly", "2026-01-05")
+    ]
