@@ -29,7 +29,7 @@ def _event_label(event: dict) -> str:
     return f"{prefix}{event['currency']} | {event['title']}"
 
 
-def alert_message(event: dict, group: dict, minutes_before: int) -> str:
+def alert_message(events: list[dict], group: dict, minutes_before: int) -> str:
     if minutes_before > 0:
         headline = f"NEWS IN {minutes_before} MINUTES"
     elif minutes_before == 0:
@@ -37,21 +37,29 @@ def alert_message(event: dict, group: dict, minutes_before: int) -> str:
     else:
         headline = f"{abs(minutes_before)} MINUTES AFTER NEWS"
 
-    moment = local_time(event, group["timezone"])
+    ordered = sorted(
+        events,
+        key=lambda event: local_time(event, group["timezone"])
+    )
+
+    moment = local_time(ordered[0], group["timezone"])
 
     lines = [
         headline,
         "",
-        _event_label(event),
+        moment.strftime("%A, %d %B %Y"),
+        moment.strftime("%I:%M %p"),
         "",
-        moment.strftime("%A, %d %B %Y %I:%M %p"),
     ]
 
-    if event.get("forecast"):
-        lines.append(f"Forecast: {event['forecast']}")
+    for event in ordered:
+        lines.append(_event_label(event))
 
-    if event.get("previous"):
-        lines.append(f"Previous: {event['previous']}")
+        if event.get("forecast"):
+            lines.append(f"   Forecast: {event['forecast']}")
+
+        if event.get("previous"):
+            lines.append(f"   Previous: {event['previous']}")
 
     return "\n".join(lines)
 

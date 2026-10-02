@@ -122,11 +122,15 @@ def test_stale_claim_is_recovered_within_recovery_window():
             return recovery
 
     now = datetime(2026, 1, 1, 10, 3, tzinfo=timezone.utc)
-    repository, telegram = RecoveryRepository([event(now - timedelta(minutes=3))], [group(alert_minutes_before=[])]), Telegram()
-    # A release schedule three minutes ago is outside normal delivery timing,
-    # but eligible to recover a stale claim after a worker crash.
+    repository = RecoveryRepository(
+        [event(now - timedelta(minutes=3))],
+        [group(alert_minutes_before=[0])],
+    )
+    telegram = Telegram()
+
     service = BotService(repository, telegram, now=lambda: now)
-    assert service._deliver_alert(event(now - timedelta(minutes=3)), group(), 0, now - timedelta(minutes=3), False, recovery=True)
+
+    assert service.check_deliveries() == 1
     assert repository.recovery_attempts == [True]
     assert len(telegram.messages) == 1
 

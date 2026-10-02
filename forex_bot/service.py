@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -53,22 +54,34 @@ class BotService:
                 if event_matches_alert_group(event, group)
             ]
 
+            alert_groups = defaultdict(list)
+
             for event in alert_matching:
+                release_time = parse_utc(event["time_utc"])
+
                 for minutes in normalized_minutes(group):
-                    scheduled = parse_utc(event["time_utc"]) - timedelta(minutes=minutes)
+                    scheduled = release_time - timedelta(minutes=minutes)
                     due = _due(now, scheduled)
                     recovery = _recovery_window(now, scheduled)
+
                     if not due and not recovery:
                         continue
-                    if self._deliver_alert(
-                        event,
-                        group,
-                        minutes,
-                        scheduled,
-                        dry_run,
-                        recovery=not due,
-                    ):
-                        delivered += 1
+
+                    # Group only events with the exact same release date/time
+                    # and the same alert timing.
+                    key = (release_time, minutes)
+
+                    alert_groups[key].append(
+                        {
+                            "event": event,
+                            "scheduled": scheduled,
+                            "recovery": not due,
+                        }
+                    )
+
+            for entries in alert_groups.values():
+                if self._deliver_alert_group(entries, group, dry_run):
+                    delivered += 1
 
             delivered += self._deliver_digests(
                 matching,
@@ -91,6 +104,81 @@ class BotService:
             return True
         except Exception:
             self.repository.fail_alert(key)
+            return False
+
+    def _deliver_alert_group(self, entries, group, dry_run=False):
+        if not entries:
+            return False
+
+        minutes = entries[0]["scheduled"]
+        release_time = parse_utc(entries[0]["event"]["time_utc"])
+        minutes_before = int((release_time - minutes).total_seconds() / 60)
+
+        claimed = []
+
+        for entry in entries:
+            event = entry["event"]
+            scheduled = entry["scheduled"]
+
+            row = {
+                "chat_id": str(group["chat_id"]),
+                "event_id": event["id"],
+                "alert_type": _alert_type(minutes_before),
+                "minutes_before": minutes_before,
+                "scheduled_for": scheduled.isoformat(),
+                "status": "pending",
+            }
+
+            if dry_run:
+                claimed.append((event, row))
+                continue
+
+            if self.repository.claim_alert(
+                row,
+                recovery=entry["recovery"],
+            ):
+                claimed.append((event, row))
+
+        if not claimed:
+            return False
+
+        events = [event for event, _ in claimed]
+
+        try:
+            message_id = self.telegram.send(
+                group["chat_id"],
+                alert_message(events, group, minutes_before),
+            )
+
+            if not dry_run:
+                for _, row in claimed:
+                    key = {
+                        field: row[field]
+                        for field in (
+                            "chat_id",
+                            "event_id",
+                            "minutes_before",
+                            "scheduled_for",
+                        )
+                    }
+                    self.repository.complete_alert(key, message_id)
+
+            return True
+
+        except Exception:
+            if not dry_run:
+                for _, row in claimed:
+                    key = {
+                        field: row[field]
+                        for field in (
+                            "chat_id",
+                            "event_id",
+                            "minutes_before",
+                            "scheduled_for",
+                        )
+                    }
+                    self.repository.fail_alert(key)
+
             return False
 
     def _deliver_digests(self, events, group, now, dry_run):
