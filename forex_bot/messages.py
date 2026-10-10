@@ -90,7 +90,7 @@ def result_message(results: list[dict], group: dict) -> str:
     result_styles = {
         "above": ("🟢", "ABOVE FORECAST"),
         "below": ("🔴", "BELOW FORECAST"),
-        "inline": ("🟡", "IN LINE WITH FORECAST"),
+        "inline": ("⚪", "IN LINE WITH FORECAST"),
     }
 
     for index, item in enumerate(ordered):
@@ -103,7 +103,7 @@ def result_message(results: list[dict], group: dict) -> str:
 
         icon, label = result_styles.get(
             comparison,
-            ("⚪", "COMPARISON UNAVAILABLE"),
+            ("⬜", "COMPARISON UNAVAILABLE"),
         )
 
         if index > 0:
