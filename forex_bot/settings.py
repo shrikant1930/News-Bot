@@ -11,6 +11,7 @@ class Settings:
     telegram_token: str
     calendar_refresh_seconds: int = 1800
     check_interval_seconds: int = 30
+    result_check_seconds: int = 60
 
 
 def load_settings() -> Settings:
@@ -27,4 +28,5 @@ def load_settings() -> Settings:
         **values,
         calendar_refresh_seconds=int(os.getenv("CALENDAR_REFRESH_SECONDS", "1800")),
         check_interval_seconds=int(os.getenv("CHECK_INTERVAL_SECONDS", "30")),
+        result_check_seconds=int(os.getenv("RESULT_CHECK_SECONDS", "60")),
     )

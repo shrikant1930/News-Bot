@@ -2,6 +2,7 @@ from datetime import date
 from itertools import groupby
 
 from forex_bot.filters import local_time
+from forex_bot.results import compare_actual_to_forecast
 
 
 def _event_symbol(event: dict) -> str:
@@ -61,6 +62,32 @@ def alert_message(events: list[dict], group: dict, minutes_before: int) -> str:
         if event.get("previous"):
             lines.append(f"   Previous: {event['previous']}")
 
+    return "\n".join(lines)
+
+
+def result_message(results: list[dict], group: dict) -> str:
+    """Format same-release results without making unsupported value judgments."""
+    ordered = sorted(results, key=lambda item: item["event"]["title"])
+    moment = local_time(ordered[0]["event"], group["timezone"])
+    lines = [
+        "ECONOMIC RESULTS",
+        "",
+        moment.strftime("%A, %d %B %Y"),
+        moment.strftime("%I:%M %p"),
+        "",
+    ]
+    icons = {"above": "🟢", "below": "🔴", "inline": "🟡"}
+    for item in ordered:
+        event = item["event"]
+        comparison = compare_actual_to_forecast(item["actual"], item["forecast"])
+        lines.extend(
+            [
+                f"{icons[comparison]} {event['currency']} | {event['title']}",
+                f"   Actual: {item['actual']} | Forecast: {item['forecast']}",
+            ]
+        )
+        if item.get("previous"):
+            lines.append(f"   Previous: {item['previous']}")
     return "\n".join(lines)
 
 

@@ -33,6 +33,11 @@ def main() -> None:
         action="store_true"
     )
 
+    mode.add_argument(
+        "--results-only",
+        action="store_true"
+    )
+
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -53,6 +58,7 @@ def main() -> None:
     )
 
     last_refresh = 0.0
+    last_result_check = 0.0
 
     while True:
 
@@ -60,7 +66,7 @@ def main() -> None:
         # CALENDAR SYNC
         # ----------------------------------------------------
 
-        if not args.alerts_only:
+        if not args.alerts_only and not args.results_only:
 
             now = time.monotonic()
 
@@ -95,7 +101,7 @@ def main() -> None:
         # ALERTS + DIGESTS
         # ----------------------------------------------------
 
-        if not args.sync_only:
+        if not args.sync_only and not args.results_only:
 
             try:
 
@@ -115,6 +121,35 @@ def main() -> None:
                 logging.exception(
                     "Delivery check failed"
                 )
+
+        # ----------------------------------------------------
+        # POST-RELEASE RESULT CHECKING
+        # ----------------------------------------------------
+
+        if not args.alerts_only and not args.sync_only:
+            monotonic_now = time.monotonic()
+
+            result_due = (
+                monotonic_now - last_result_check
+                >= settings.result_check_seconds
+                or last_result_check == 0
+            )
+        else:
+            result_due = False
+
+        if result_due:
+            try:
+                delivered = service.check_results(args.dry_run)
+
+                logging.info(
+                    "Result alerts processed: %s",
+                    delivered,
+                )
+
+                last_result_check = monotonic_now
+
+            except Exception:
+                logging.exception("Result alert check failed")
 
 
         # ----------------------------------------------------

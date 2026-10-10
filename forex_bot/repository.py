@@ -56,6 +56,17 @@ class SupabaseRepository:
     def fail_alert(self, key: dict[str, Any]) -> None:
         self.client.table("alert_log").update({"status": "failed"}).match(key).execute()
 
+    def claim_result_alert(self, row: dict[str, Any], recovery: bool = False) -> bool:
+        return self._claim("result_alert_log", _result_key(row), row, recovery)
+
+    def complete_result_alert(self, key: dict[str, Any], message_id: int) -> None:
+        self.client.table("result_alert_log").update(
+            {"status": "sent", "sent_at": _utc_iso(), "telegram_message_id": message_id}
+        ).match(key).execute()
+
+    def fail_result_alert(self, key: dict[str, Any]) -> None:
+        self.client.table("result_alert_log").update({"status": "failed"}).match(key).execute()
+
     def claim_digest(self, chat_id: str | int, digest_type: str, digest_date: str) -> bool:
         row = {"chat_id": str(chat_id), "digest_type": digest_type, "digest_date": digest_date}
         try:
@@ -114,6 +125,27 @@ class SupabaseRepository:
     def fail_digest(self, chat_id: str | int, digest_type: str, digest_date: str) -> None:
         self.client.table("digest_log").update({"status": "failed"}).match({"chat_id": str(chat_id), "digest_type": digest_type, "digest_date": digest_date}).execute()
 
+    def _claim(self, table: str, key: dict[str, Any], row: dict[str, Any], recovery: bool) -> bool:
+        claimed_at = _utc_now()
+        pending_row = {**row, "status": "pending", "claimed_at": claimed_at.isoformat()}
+        if not recovery:
+            try:
+                self.client.table(table).insert(pending_row).execute()
+                return True
+            except Exception:
+                pass
+        try:
+            rows = self.client.table(table).select("status,claimed_at").match(key).limit(1).execute().data or []
+            if not rows or not _stale_claim(rows[0], claimed_at):
+                return False
+            previous = rows[0]
+            query = self.client.table(table).update({"status": "pending", "claimed_at": claimed_at.isoformat()}).match(key).eq("status", previous["status"])
+            if previous.get("claimed_at") is not None:
+                query = query.eq("claimed_at", previous["claimed_at"])
+            return bool(query.select("status").execute().data or [])
+        except Exception:
+            return False
+
 
 def _utc_iso() -> str:
     return _utc_now().isoformat()
@@ -125,6 +157,10 @@ def _utc_now() -> datetime:
 
 def _alert_key(row: dict[str, Any]) -> dict[str, Any]:
     return {field: row[field] for field in ("chat_id", "event_id", "minutes_before", "scheduled_for")}
+
+
+def _result_key(row: dict[str, Any]) -> dict[str, Any]:
+    return {field: row[field] for field in ("chat_id", "event_id", "release_time")}
 
 
 def _stale_claim(row: dict[str, Any], now: datetime) -> bool:
