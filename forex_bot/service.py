@@ -6,11 +6,14 @@ from forex_bot.calendar import fetch_prepared_events, reconcile
 from forex_bot.filters import (
     event_matches_group,
     event_matches_alert_group,
+    event_matches_result_group,
     local_time,
     normalized_minutes,
     parse_utc,
 )
 from forex_bot.messages import alert_message, digest_message
+from forex_bot.messages import result_message
+from forex_bot.results import ResultSource, match_released_results
 
 
 ALERT_EARLY_SECONDS = 15
@@ -18,12 +21,15 @@ ALERT_LATE_SECONDS = 90
 DIGEST_GRACE_SECONDS = 15 * 60
 ALERT_CLAIM_STALE_SECONDS = 2 * 60
 ALERT_RECOVERY_SECONDS = 15 * 60
+RESULT_MINIMUM_AGE_SECONDS = 60
+RESULT_MAXIMUM_AGE_SECONDS = 60 * 60
 
 
 class BotService:
-    def __init__(self, repository, telegram, now=lambda: datetime.now(timezone.utc)):
+    def __init__(self, repository, telegram, result_source=None, now=lambda: datetime.now(timezone.utc)):
         self.repository = repository
         self.telegram = telegram
+        self.result_source = result_source or ResultSource()
         self.now = now
 
     def refresh_calendar(self) -> dict[str, int]:
@@ -93,11 +99,67 @@ class BotService:
             )
         return delivered
 
+    def check_results(self, dry_run: bool = False) -> int:
+        """Check only recently released events and make one narrow API request."""
+        now = self.now()
+        events = [
+            event
+            for event in self.repository.active_events()
+            if _result_window(now, parse_utc(event["time_utc"]))
+        ]
+        groups = self.repository.enabled_groups()
+        if not events or not groups:
+            return 0
+
+        earliest = min(parse_utc(event["time_utc"]) for event in events)
+        source_events = self.result_source.fetch(earliest - timedelta(minutes=2), now + timedelta(minutes=2))
+        released = match_released_results(events, source_events)
+        if not released:
+            return 0
+
+        delivered = 0
+        for group in groups:
+            try:
+                ZoneInfo(group["timezone"])
+            except (KeyError, ValueError):
+                continue
+            matching = [item for item in released if event_matches_result_group(item["event"], group)]
+            for items in _group_results(matching).values():
+                if self._deliver_result_group(items, group, dry_run):
+                    delivered += 1
+        return delivered
+
     def _deliver_alert(self, event, group, minutes, scheduled, dry_run, recovery=False):
         row = {"chat_id": str(group["chat_id"]), "event_id": event["id"], "alert_type": _alert_type(minutes), "minutes_before": minutes, "scheduled_for": scheduled.isoformat(), "status": "pending"}
         if dry_run:
             return True
         if not self.repository.claim_alert(row, recovery=recovery):
+            return False
+
+    def _deliver_result_group(self, results, group, dry_run):
+        claimed = []
+        for item in results:
+            event = item["event"]
+            row = {
+                "chat_id": str(group["chat_id"]),
+                "event_id": event["id"],
+                "release_time": event["time_utc"],
+                "status": "pending",
+            }
+            if dry_run or self.repository.claim_result_alert(row):
+                claimed.append((item, row))
+        if not claimed:
+            return False
+        try:
+            message_id = self.telegram.send(group["chat_id"], result_message([item for item, _ in claimed], group))
+            if not dry_run:
+                for _, row in claimed:
+                    self.repository.complete_result_alert(_result_alert_key(row), message_id)
+            return True
+        except Exception:
+            if not dry_run:
+                for _, row in claimed:
+                    self.repository.fail_result_alert(_result_alert_key(row))
             return False
         key = {field: row[field] for field in ("chat_id", "event_id", "minutes_before", "scheduled_for")}
         try:
@@ -317,6 +379,22 @@ def _due(now, scheduled):
 def _recovery_window(now, scheduled):
     elapsed = (now - scheduled).total_seconds()
     return ALERT_CLAIM_STALE_SECONDS <= elapsed <= ALERT_RECOVERY_SECONDS
+
+
+def _result_window(now, release_time):
+    elapsed = (now - release_time).total_seconds()
+    return RESULT_MINIMUM_AGE_SECONDS <= elapsed <= RESULT_MAXIMUM_AGE_SECONDS
+
+
+def _group_results(results):
+    grouped = defaultdict(list)
+    for item in results:
+        grouped[parse_utc(item["event"]["time_utc"])].append(item)
+    return grouped
+
+
+def _result_alert_key(row):
+    return {field: row[field] for field in ("chat_id", "event_id", "release_time")}
 
 
 def _alert_type(minutes):

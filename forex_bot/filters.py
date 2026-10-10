@@ -47,6 +47,21 @@ def event_matches_alert_group(event: dict, group: dict) -> bool:
     return event.get("impact") in group.get("alert_impacts", [])
 
 
+def event_matches_result_group(event: dict, group: dict) -> bool:
+    """Match released-result alerts; speeches are always excluded."""
+    currency = normalize_currency(event.get("currency"))
+    if currency is None or currency not in normalized_currencies(group):
+        return False
+    if event.get("is_speech", False):
+        return False
+    impacts = {
+        str(impact).strip().title()
+        for impact in group.get("actual_alert_impacts", [])
+        if str(impact).strip().title() in {"High", "Medium", "Low"}
+    }
+    return str(event.get("impact", "")).strip().title() in impacts
+
+
 def parse_utc(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)

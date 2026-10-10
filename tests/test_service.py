@@ -1,14 +1,16 @@
 from datetime import datetime, timedelta, timezone
 
-from forex_bot.filters import event_matches_group
+from forex_bot.filters import event_matches_group, event_matches_result_group
 from forex_bot.repository import _stale_claim
 from forex_bot.service import BotService, _time_due
+from forex_bot.results import compare_actual_to_forecast, match_released_results
 
 
 class Repository:
     def __init__(self, events, groups):
         self.events, self.groups = events, groups
         self.claimed_alerts, self.claimed_digests = set(), set()
+        self.claimed_results = set()
         self.pinned_records = []
         self.unpinned_records = []
 
@@ -22,6 +24,14 @@ class Repository:
         self.claimed_alerts.add(key); return True
     def complete_alert(self, key, message_id): pass
     def fail_alert(self, key): pass
+    def claim_result_alert(self, row, recovery=False):
+        key = (row["chat_id"], row["event_id"], row["release_time"])
+        if key in self.claimed_results:
+            return False
+        self.claimed_results.add(key)
+        return True
+    def complete_result_alert(self, key, message_id): pass
+    def fail_result_alert(self, key): pass
     def claim_digest(self, chat_id, kind, date):
         key = (str(chat_id), kind, date)
         if key in self.claimed_digests: return False
@@ -59,6 +69,27 @@ class Telegram:
 
 def event(moment, currency="USD", impact="High", speech=False):
     return {"id": "event-1", "title": "CPI", "currency": currency, "impact": impact, "is_speech": speech, "time_utc": moment.isoformat(), "status": "active"}
+
+
+class ResultSource:
+    def __init__(self, events):
+        self.events = events
+        self.calls = []
+
+    def fetch(self, start, end):
+        self.calls.append((start, end))
+        return self.events
+
+
+def released_result(item, actual="2.0", forecast="1.5", previous="1.0"):
+    return {
+        "time": item["time_utc"],
+        "currency": item["currency"],
+        "name": item["title"],
+        "actual": actual,
+        "forecast": forecast,
+        "previous": previous,
+    }
 
 
 def group(**extra):
@@ -100,6 +131,13 @@ def test_speech_alerts_respect_alert_impacts():
 def test_currency_filters_are_case_insensitive_and_reject_unsupported_codes():
     assert event_matches_group(event(datetime.now(timezone.utc), currency="usd"), group(currencies=["Usd", "eur", "not-a-currency"]))
     assert not event_matches_group(event(datetime.now(timezone.utc), currency="XXX"), group(currencies=["xxx", "USD"]))
+
+
+def test_result_filters_respect_currency_impact_and_exclude_speeches():
+    moment = datetime.now(timezone.utc)
+    assert event_matches_result_group(event(moment, currency="usd", impact="Low"), group(currencies=["USD"], actual_alert_impacts=["low"]))
+    assert not event_matches_result_group(event(moment, impact="Medium"), group(actual_alert_impacts=["High"]))
+    assert not event_matches_result_group(event(moment, impact="High", speech=True), group(actual_alert_impacts=["High"], include_speeches=True))
 
 
 def test_daily_digest_is_local_timezone_filtered_and_deduplicated():
@@ -274,3 +312,60 @@ def test_expired_weekly_pin_is_unpinned():
     assert repository.unpinned_records == [
         ("100", "weekly", "2026-01-05")
     ]
+
+
+def test_results_retry_when_actual_is_missing_then_send_once():
+    now = datetime(2026, 1, 1, 10, 1, tzinfo=timezone.utc)
+    item = event(now - timedelta(minutes=1))
+    source = ResultSource([released_result(item, actual=None)])
+    repository, telegram = Repository([item], [group(actual_alert_impacts=["High"])]), Telegram()
+    service = BotService(repository, telegram, result_source=source, now=lambda: now)
+
+    assert service.check_results() == 0
+    assert not telegram.messages
+
+    source.events = [released_result(item)]
+    assert service.check_results() == 1
+    assert len(telegram.messages) == 1
+    assert service.check_results() == 0
+    assert len(source.calls) == 3
+
+
+def test_results_at_same_time_are_grouped_and_colored_without_good_bad_claims():
+    now = datetime(2026, 1, 1, 10, 1, tzinfo=timezone.utc)
+    first = event(now - timedelta(minutes=1), impact="High")
+    second = {**event(now - timedelta(minutes=1), impact="Medium"), "id": "event-2", "title": "Employment"}
+    source = ResultSource([
+        released_result(first, actual="2.0", forecast="1.5"),
+        released_result(second, actual="1.0", forecast="1.5"),
+    ])
+    repository, telegram = Repository([first, second], [group(actual_alert_impacts=["High", "Medium"])]), Telegram()
+    service = BotService(repository, telegram, result_source=source, now=lambda: now)
+
+    assert service.check_results() == 1
+    assert len(telegram.messages) == 1
+    text = telegram.messages[0][1]
+    assert "🟢" in text and "🔴" in text
+    assert "good" not in text.lower() and "bad" not in text.lower()
+
+
+def test_result_checker_skips_speeches_and_missing_forecasts():
+    now = datetime(2026, 1, 1, 10, 1, tzinfo=timezone.utc)
+    speech = event(now - timedelta(minutes=1), speech=True)
+    no_forecast = {**event(now - timedelta(minutes=1)), "id": "event-2", "title": "GDP"}
+    source = ResultSource([
+        released_result(speech),
+        released_result(no_forecast, actual="3.0", forecast=None),
+    ])
+    repository, telegram = Repository([speech, no_forecast], [group(actual_alert_impacts=["High"])]), Telegram()
+    assert BotService(repository, telegram, result_source=source, now=lambda: now).check_results() == 0
+    assert not telegram.messages
+
+
+def test_results_require_compatible_units_and_allow_unambiguous_forecast_match():
+    item = event(datetime(2026, 1, 1, 10, tzinfo=timezone.utc))
+    item["title"] = "Payroll headline"
+    source_item = {**released_result(item, actual=152000, forecast=145000), "name": "Nonfarm Payrolls"}
+    item["forecast"] = "145K"
+    assert match_released_results([item], [source_item])
+    assert compare_actual_to_forecast("1", "1%") == "inline"
