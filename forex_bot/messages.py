@@ -66,30 +66,70 @@ def alert_message(events: list[dict], group: dict, minutes_before: int) -> str:
 
 
 def result_message(results: list[dict], group: dict) -> str:
-    """Format same-release results without making unsupported value judgments."""
-    ordered = sorted(results, key=lambda item: item["event"]["title"])
+    """Format economic results prominently for Telegram."""
+
+    if not results:
+        return "📊 ECONOMIC RESULTS\n\nNo results available."
+
+    ordered = sorted(
+        results,
+        key=lambda item: item["event"]["title"].lower(),
+    )
+
     moment = local_time(ordered[0]["event"], group["timezone"])
+
     lines = [
-        "ECONOMIC RESULTS",
+        "📊 ECONOMIC RESULTS RELEASED",
+        "━━━━━━━━━━━━━━━━━━━━",
         "",
-        moment.strftime("%A, %d %B %Y"),
-        moment.strftime("%I:%M %p"),
+        f"📅 {moment.strftime('%A, %d %B %Y')}",
+        f"🕒 {moment.strftime('%I:%M %p')}",
         "",
     ]
-    icons = {"above": "🟢", "below": "🔴", "inline": "🟡"}
-    for item in ordered:
-        event = item["event"]
-        comparison = compare_actual_to_forecast(item["actual"], item["forecast"])
-        lines.extend(
-            [
-                f"{icons[comparison]} {event['currency']} | {event['title']}",
-                f"   Actual: {item['actual']} | Forecast: {item['forecast']}",
-            ]
-        )
-        if item.get("previous"):
-            lines.append(f"   Previous: {item['previous']}")
-    return "\n".join(lines)
 
+    result_styles = {
+        "above": ("🟢", "ABOVE FORECAST"),
+        "below": ("🔴", "BELOW FORECAST"),
+        "inline": ("🟡", "IN LINE WITH FORECAST"),
+    }
+
+    for index, item in enumerate(ordered):
+        event = item["event"]
+
+        comparison = compare_actual_to_forecast(
+            item["actual"],
+            item["forecast"],
+        )
+
+        icon, label = result_styles.get(
+            comparison,
+            ("⚪", "COMPARISON UNAVAILABLE"),
+        )
+
+        if index > 0:
+            lines.extend([
+                "",
+                "━━━━━━━━━━━━━━━━━━━━",
+                "",
+            ])
+
+        lines.extend([
+            f"{icon} {label}",
+            f"💱 {event['currency']} | {event['title']}",
+            "",
+            f"📊 Actual:   {item['actual']}",
+            f"🎯 Forecast: {item['forecast']}",
+        ])
+
+        if item.get("previous"):
+            lines.append(f"📋 Previous: {item['previous']}")
+
+    lines.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+    ])
+
+    return "\n".join(lines)
 
 def digest_message(
     events: list[dict],
