@@ -106,6 +106,17 @@ def test_alert_claim_prevents_duplicate_after_restart_window():
     assert len(telegram.messages) == 1
 
 
+def test_single_alert_helper_delivers_and_marks_the_claim_complete():
+    now = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
+    item = event(now)
+    repository, telegram = Repository([item], [group()]), Telegram()
+    service = BotService(repository, telegram, now=lambda: now)
+
+    assert service._deliver_alert(item, group(), 0, now, dry_run=False)
+    assert len(telegram.messages) == 1
+    assert service._deliver_alert(item, group(), 0, now, dry_run=False) is False
+
+
 def test_speech_alerts_respect_alert_impacts():
     now = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
 

@@ -136,6 +136,26 @@ class BotService:
         if not self.repository.claim_alert(row, recovery=recovery):
             return False
 
+        key = {
+            field: row[field]
+            for field in (
+                "chat_id",
+                "event_id",
+                "minutes_before",
+                "scheduled_for",
+            )
+        }
+        try:
+            message_id = self.telegram.send(
+                group["chat_id"],
+                alert_message([event], group, minutes),
+            )
+            self.repository.complete_alert(key, message_id)
+            return True
+        except Exception:
+            self.repository.fail_alert(key)
+            return False
+
     def _deliver_result_group(self, results, group, dry_run):
         claimed = []
         for item in results:
@@ -160,14 +180,6 @@ class BotService:
             if not dry_run:
                 for _, row in claimed:
                     self.repository.fail_result_alert(_result_alert_key(row))
-            return False
-        key = {field: row[field] for field in ("chat_id", "event_id", "minutes_before", "scheduled_for")}
-        try:
-            message_id = self.telegram.send(group["chat_id"], alert_message(event, group, minutes))
-            self.repository.complete_alert(key, message_id)
-            return True
-        except Exception:
-            self.repository.fail_alert(key)
             return False
 
     def _deliver_alert_group(self, entries, group, dry_run=False):

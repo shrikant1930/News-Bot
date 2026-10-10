@@ -15,6 +15,10 @@ One Python worker refreshes the economic calendar, stores its durable event iden
 
 `python -m forex_bot.worker --results-only` runs only the lightweight post-release result checker. It uses one narrow result-source request only when active events are one to sixty minutes past their release time.
 
+GitHub Actions runs alerts and calendar sync independently. The supplied `results.yml` workflow is only for post-release results and is intended to be dispatched every minute by the Supabase Cron/Vault bridge documented in `schema.sql`; it uses the existing `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, and `TELEGRAM_BOT_TOKEN` GitHub secrets.
+
+For the one-minute dispatcher, create the two Vault secrets named `github_results_dispatch_url` and `github_actions_dispatch_token` as shown in `schema.sql`, then create the `forex-news-results-dispatch` pg_cron job. The GitHub token needs Actions write access for this repository; it is separate from the bot's existing GitHub secrets and remains only in Vault.
+
 Calendar refresh defaults to every 30 minutes; alert/digest evaluation defaults to every 30 seconds. Set `CALENDAR_REFRESH_SECONDS` and `CHECK_INTERVAL_SECONDS` for deployment. Run one worker instance unless an external leader lock is added.
 
 Fresh alert claims are not retried, which avoids duplicate delivery after an ambiguous Telegram timeout. Stale `pending` or `failed` alert claims may be recovered after two minutes for up to 15 minutes after their schedule, covering worker crashes while limiting late retries.
