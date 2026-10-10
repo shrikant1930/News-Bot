@@ -122,22 +122,32 @@ def main() -> None:
                     "Delivery check failed"
                 )
 
-        if not args.sync_only:
+        # ----------------------------------------------------
+        # POST-RELEASE RESULT CHECKING
+        # ----------------------------------------------------
+
+        if not args.alerts_only and not args.sync_only:
             monotonic_now = time.monotonic()
+
             result_due = (
                 monotonic_now - last_result_check
                 >= settings.result_check_seconds
                 or last_result_check == 0
             )
-
         else:
             result_due = False
 
         if result_due:
             try:
                 delivered = service.check_results(args.dry_run)
-                logging.info("Result alerts processed: %s", delivered)
+
+                logging.info(
+                    "Result alerts processed: %s",
+                    delivered,
+                )
+
                 last_result_check = monotonic_now
+
             except Exception:
                 logging.exception("Result alert check failed")
 
